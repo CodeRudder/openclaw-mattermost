@@ -324,6 +324,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     messageIds?: string[],
   ) => {
     const channelId = post.channel_id ?? payload.data?.channel_id ?? payload.broadcast?.channel_id;
+    console.log("[DEBUG] handlePost called, post.id:", post.id, "channel:", post.channel_id);
     if (!channelId) {
       return;
     }
@@ -577,6 +578,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     const bodySource = oncharTriggered ? oncharResult.stripped : rawText;
     const baseText = [bodySource, mediaPlaceholder].filter(Boolean).join("\n").trim();
     const bodyText = normalizeMention(baseText, botUsername);
+    console.log("[DEBUG] bodyText created:", bodyText.substring(0, 100));
     if (!bodyText) {
       return;
     }
@@ -595,25 +597,33 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       directLabel: senderName,
       directId: senderId,
     });
+    // Clean message content to prevent message loops
+    const cleanedBodyText = bodyText.replace(/@/g, "").replace(/NO_REPLY/g, "");
+    const cleanedSenderName = senderName.replace(/@/g, "");
+    const cleanedRoomLabel = roomLabel.replace(/@/g, "");
 
-    const preview = bodyText.replace(/\s+/g, " ").slice(0, 160);
+    // Add account label for Agent
+    const bodyForAgentWithAccount = `TO ${route.agentId}, ${cleanedBodyText}`;
+
+
+    const preview = cleanedBodyText.replace(/\s+/g, " ").slice(0, 160);
     const inboundLabel =
       kind === "direct"
-        ? `Mattermost DM from ${senderName}`
-        : `Mattermost message in ${roomLabel} from ${senderName}`;
-    core.system.enqueueSystemEvent(`${inboundLabel}: ${preview}`, {
+        ? `Mattermost DM from ${cleanedSenderName}`
+        : `Mattermost message in ${cleanedRoomLabel} from ${cleanedSenderName}`;
+    core.system.enqueueSystemEvent(`${inboundLabel}`, {
       sessionKey,
       contextKey: `mattermost:message:${channelId}:${post.id ?? "unknown"}`,
     });
 
-    const textWithId = `${bodyText}\n[mattermost message id: ${post.id ?? "unknown"} channel: ${channelId}]`;
+    const textWithId = `${cleanedBodyText}\n[mattermost message id: ${post.id ?? "unknown"} channel: ${channelId}]`;
     const body = core.channel.reply.formatInboundEnvelope({
       channel: "Mattermost",
       from: fromLabel,
       timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
       body: textWithId,
       chatType,
-      sender: { name: senderName, id: senderId },
+      sender: { name: cleanedSenderName, id: senderId },
     });
     let combinedBody = body;
     if (historyKey) {
@@ -631,7 +641,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
               entry.messageId ? ` [id:${entry.messageId} channel:${channelId}]` : ""
             }`,
             chatType,
-            senderLabel: entry.sender,
+            senderLabel: entry.sender.replace(/@/g, ""),
           }),
       });
     }
@@ -641,17 +651,18 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     const inboundHistory =
       historyKey && historyLimit > 0
         ? (channelHistories.get(historyKey) ?? []).map((entry) => ({
-            sender: entry.sender,
+            sender: entry.sender.replace(/@/g, ""),
             body: entry.body,
             timestamp: entry.timestamp,
           }))
         : undefined;
+    console.log("[DEBUG] Creating ctxPayload, sessionKey:", sessionKey, "chatType:", chatType);
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: combinedBody,
-      BodyForAgent: bodyText,
+      BodyForAgent: bodyForAgentWithAccount,
       InboundHistory: inboundHistory,
-      RawBody: bodyText,
-      CommandBody: bodyText,
+      RawBody: cleanedBodyText,
+      CommandBody: cleanedBodyText,
       From:
         kind === "direct"
           ? `mattermost:${senderId}`
