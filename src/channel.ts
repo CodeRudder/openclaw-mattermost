@@ -247,6 +247,16 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = {
   groups: {
     resolveRequireMention: resolveMattermostGroupRequireMention,
   },
+  agentPrompt: {
+    messageToolHints: () => [
+      "",
+      "**群聊发送规范**：",
+      "- 消息会通知被@的成员，避免发送无价值内容",
+      "- 禁止发送：分析过程、思考内容、对消息的分析",
+      "- 不需回复时输出 NO_REPLY",
+      "- 回复询问/通知后，如有未完成任务应继续处理",
+    ],
+  },
   actions: mattermostMessageActions,
   messaging: {
     normalizeTarget: normalizeMattermostMessagingTarget,
@@ -273,14 +283,39 @@ export const mattermostPlugin: ChannelPlugin<ResolvedMattermostAccount> = {
       return { ok: true, to: trimmed };
     },
     sendText: async ({ to, text, accountId, replyToId }) => {
-      const result = await sendMessageMattermost(to, text, {
+      // Group chat filter: channel: targets require [GROUP-CHAT] prefix on first line
+      const GROUP_CHAT_PREFIX = "[GROUP-CHAT]";
+      let filteredText = text;
+      if (to.startsWith("channel:")) {
+        const firstLine = (filteredText ?? "").split("\n")[0] ?? "";
+        if (firstLine.includes(GROUP_CHAT_PREFIX)) {
+          filteredText = filteredText.replace(GROUP_CHAT_PREFIX, "").trim();
+          console.log(`[SEND-DEBUG] outbound sendText: prefix stripped, to=${to}`);
+        } else {
+          console.log(`[SEND-DEBUG] outbound sendText: BLOCKED no [GROUP-CHAT] prefix, to=${to} preview="${(filteredText ?? "").substring(0, 80).replace(/\n/g, "\\n")}"`);
+          return { channel: "mattermost", messageId: "blocked", channelId: to.slice("channel:".length) };
+        }
+      }
+      const result = await sendMessageMattermost(to, filteredText, {
         accountId: accountId ?? undefined,
         replyToId: replyToId ?? undefined,
       });
       return { channel: "mattermost", ...result };
     },
     sendMedia: async ({ to, text, mediaUrl, accountId, replyToId }) => {
-      const result = await sendMessageMattermost(to, text, {
+      // Group chat filter: channel: targets require [GROUP-CHAT] prefix on first line (text only; media always allowed)
+      const GROUP_CHAT_PREFIX = "[GROUP-CHAT]";
+      let filteredText = text;
+      if (to.startsWith("channel:") && filteredText) {
+        const firstLine = filteredText.split("\n")[0] ?? "";
+        if (firstLine.includes(GROUP_CHAT_PREFIX)) {
+          filteredText = filteredText.replace(GROUP_CHAT_PREFIX, "").trim();
+        } else {
+          console.log(`[SEND-DEBUG] outbound sendMedia: no prefix, clearing text, to=${to}`);
+          filteredText = "";
+        }
+      }
+      const result = await sendMessageMattermost(to, filteredText, {
         accountId: accountId ?? undefined,
         mediaUrl,
         replyToId: replyToId ?? undefined,

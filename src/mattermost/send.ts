@@ -142,6 +142,9 @@ export async function sendMessageMattermost(
   text: string,
   opts: MattermostSendOpts = {},
 ): Promise<MattermostSendResult> {
+  // Debug: log all Mattermost sends with caller stack to identify delivery path
+  const stack = new Error().stack?.split("\n").slice(2, 5).join(" | ") ?? "";
+  console.log(`[SEND-DEBUG] sendMessageMattermost to=${to} textLen=${(text ?? "").length} preview="${(text ?? "").substring(0, 80).replace(/\n/g, "\\n")}" caller=${stack}`);
   const core = getCore();
   const logger = core.logging.getChildLogger({ module: "mattermost" });
   const cfg = core.config.loadConfig();

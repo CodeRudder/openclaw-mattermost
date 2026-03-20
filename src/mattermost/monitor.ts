@@ -598,12 +598,38 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       directId: senderId,
     });
     // Clean message content to prevent message loops
-    const cleanedBodyText = bodyText.replace(/@/g, "").replace(/NO_REPLY/g, "");
+    // Also remove existing group hints and GROUP-CHAT markers to avoid duplication in queued messages
+    const cleanedBodyText = bodyText
+      .replace(/@/g, "")
+      .replace(/NO_REPLY/g, "")
+      .replace(/\[群聊消息处理提示\][^\n]*/g, "")
+      .replace(/\[GROUP-CHAT\]\s*/g, "")
+      .replace(/\n\n+/g, "\n\n")
+      .trim();
     const cleanedSenderName = senderName.replace(/@/g, "");
     const cleanedRoomLabel = roomLabel.replace(/@/g, "");
 
-    // Add account label for Agent
-    const bodyForAgentWithAccount = `TO ${route.agentId}, ${cleanedBodyText}`;
+    // Build body for agent with group chat context hints
+    let bodyForAgentWithAccount: string;
+    if (kind !== "direct") {
+      // Group chat: add processing hints
+      const isQueuedMessage = cleanedBodyText.includes("[Queued messages while agent was busy]");
+      const groupHints = isQueuedMessage
+        ? `\n\n[群聊消息处理提示] 这是队列合并消息。忽略其它Agent的分析内容，只关注@你的原始消息。快速判断是否需要回复。不需要回复时仅输出NO_REPLY。需要回复时在消息开头添加[GROUP-CHAT]标记，然后发送消息内容。\n\n`
+        : `[群聊消息处理提示] 忽略消息中其它Agent的分析过程，只关注与你相关的@消息或问题。不需要回复时仅输出NO_REPLY。需要回复时在消息开头添加[GROUP-CHAT]标记，然后发送消息内容。\n\n`;
+
+      if (isQueuedMessage) {
+        // Insert hints after "[Queued messages while agent was busy]" line
+        bodyForAgentWithAccount = `TO ${route.agentId}, ${cleanedBodyText.replace(
+          "[Queued messages while agent was busy]",
+          "[Queued messages while agent was busy]" + groupHints
+        )}`;
+      } else {
+        bodyForAgentWithAccount = `${groupHints}TO ${route.agentId}, ${cleanedBodyText}`;
+      }
+    } else {
+      bodyForAgentWithAccount = `TO ${route.agentId}, ${cleanedBodyText}`;
+    }
 
 
     const preview = cleanedBodyText.replace(/\s+/g, " ").slice(0, 160);
@@ -755,9 +781,36 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
         ...prefixOptions,
         humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
         typingCallbacks,
+        isGroupChat: kind !== "direct",
         deliver: async (payload: ReplyPayload) => {
           const mediaUrls = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
-          const text = core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode);
+          let text = core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode);
+
+          // Group chat prefix check: [GROUP-CHAT] must appear on the first line.
+          // Use firstLine.includes() because responsePrefix from prefixOptions
+          // may be prepended to payload.text before deliver() is called.
+          const isGroupChat = kind !== "direct";
+          const GROUP_CHAT_PREFIX = "[GROUP-CHAT]";
+          console.log(`[GROUP-CHAT-DEBUG] deliver called: isGroupChat=${isGroupChat} textLen=${text.length} firstLine="${(text.split("\n")[0] ?? "").substring(0, 120)}"`);
+          if (isGroupChat) {
+            const firstLine = text.split("\n")[0] ?? "";
+            if (firstLine.includes(GROUP_CHAT_PREFIX)) {
+              // Strip the prefix and continue
+              text = text.replace(GROUP_CHAT_PREFIX, "").trim();
+              console.log(`[GROUP-CHAT-DEBUG] prefix found, stripped. new text preview: "${text.substring(0, 80)}"`);
+            } else {
+              // No prefix on first line - drop the message (prevent accidental content leakage to group chats)
+              if (mediaUrls.length === 0) {
+                console.log(`[GROUP-CHAT-DEBUG] DROPPED: no prefix on first line, text preview: "${text.substring(0, 120)}"`);
+                runtime.log?.(`dropped group chat message without ${GROUP_CHAT_PREFIX} prefix on first line`);
+                return;
+              }
+              // If there's media, send media only (no text)
+              console.log(`[GROUP-CHAT-DEBUG] has media but no prefix, clearing text`);
+              text = "";
+            }
+          }
+
           if (mediaUrls.length === 0) {
             const chunkMode = core.channel.text.resolveChunkMode(
               cfg,
